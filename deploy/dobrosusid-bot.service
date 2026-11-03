@@ -1,0 +1,21 @@
+[Unit]
+Description=Dobrosusid neighbours chat helper (Telegram bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dobrosusid
+WorkingDirectory=/opt/dobrosusid-bot
+EnvironmentFile=/etc/dobrosusid-bot.env
+ExecStart=/opt/dobrosusid-bot/.venv/bin/python -m dobrosusid
+Restart=always
+RestartSec=5
+StateDirectory=dobrosusid-bot
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
