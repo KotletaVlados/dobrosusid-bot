@@ -36,7 +36,21 @@ class Settings:
     # Запобіжник від неочікуваних витрат на API.
     max_llm_calls_per_day: int = 1500
     intro_reminders: bool = True
+    # Не частіше одного повідомлення-нагадування в чат за цей час.
     intro_reminder_interval_minutes: float = 20
+    # Кожній людині — до intro_reminder_max нагадувань з інтервалом intro_reminder_repeat_days.
+    intro_reminder_repeat_days: float = 3
+    intro_reminder_max: int = 3
+    # Новачок не може писати в чат, поки не представиться боту (потрібне право обмежувати учасників).
+    gate_new_members: bool = True
+    # Якщо новачок так і не представився (чи бот лежав), обмеження знімається само через стільки годин.
+    gate_timeout_hours: float = 24
+    # Ліміти на одну людину: звернення до бота в чаті та спроби знайомства в особистих.
+    address_limit_per_10min: int = 3
+    address_limit_per_day: int = 20
+    dm_llm_limit_per_day: int = 10
+    # Домени, які бот може згадувати у відповідях (через кому). За замовчуванням — жодних посилань.
+    allowed_link_domains: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -60,5 +74,15 @@ class Settings:
             intro_reminders=_bool(env.get("INTRO_REMINDERS", "true")),
             intro_reminder_interval_minutes=float(
                 env.get("INTRO_REMINDER_INTERVAL_MINUTES", cls.intro_reminder_interval_minutes)
+            ),
+            intro_reminder_repeat_days=float(env.get("INTRO_REMINDER_REPEAT_DAYS", cls.intro_reminder_repeat_days)),
+            intro_reminder_max=int(env.get("INTRO_REMINDER_MAX", cls.intro_reminder_max)),
+            gate_new_members=_bool(env.get("GATE_NEW_MEMBERS", "true")),
+            gate_timeout_hours=float(env.get("GATE_TIMEOUT_HOURS", cls.gate_timeout_hours)),
+            address_limit_per_10min=int(env.get("ADDRESS_LIMIT_PER_10MIN", cls.address_limit_per_10min)),
+            address_limit_per_day=int(env.get("ADDRESS_LIMIT_PER_DAY", cls.address_limit_per_day)),
+            dm_llm_limit_per_day=int(env.get("DM_LLM_LIMIT_PER_DAY", cls.dm_llm_limit_per_day)),
+            allowed_link_domains=frozenset(
+                d.strip().lower() for d in env.get("ALLOWED_LINK_DOMAINS", "").split(",") if d.strip()
             ),
         )

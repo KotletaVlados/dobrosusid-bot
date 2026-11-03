@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from typing import Literal
@@ -10,16 +11,19 @@ from zoneinfo import ZoneInfo
 import anthropic
 from pydantic import BaseModel
 
-from .prompts import SYSTEM_PROMPT
+from .prompts import EXTRACT_SYSTEM, SYSTEM_PROMPT
 from .storage import Resident, StoredMessage
 
 log = logging.getLogger(__name__)
 
 MAX_MESSAGE_CHARS = 1200
+# Екстренну пам'ятку (101–104) повторюємо в чаті не частіше, ніж раз на 10 хвилин.
+EMERGENCY_GAP_SECONDS = 600
 
 
 class Introduction(BaseModel):
-    user_id: int
+    # Номер повідомлення, а не user_id: автора за номером визначає код, тож «представити» сусіда не вийде.
+    message_id: int
     name: str
     apartment: str
 
@@ -31,6 +35,12 @@ class Decision(BaseModel):
     reply_to_message_id: int | None
     text: str
     introductions: list[Introduction]
+
+
+class ExtractedIntro(BaseModel):
+    found: bool
+    name: str
+    apartment: str
 
 
 def render_transcript(
@@ -52,22 +62,33 @@ def render_transcript(
 
 
 def _render_line(msg: StoredMessage, residents: dict[int, Resident], tz: ZoneInfo) -> str:
-    when = datetime.fromtimestamp(msg.ts, tz).strftime("%H:%M")
-    if msg.is_bot:
-        who = "БОТ"
-    else:
-        resident = residents.get(msg.user_id) if msg.user_id else None
-        tag = f"[{resident.name}, кв. {resident.apartment}]" if resident else "[не представився]"
-        who = f"{msg.author} {tag} (id {msg.user_id})"
-    reply = f" ↩#{msg.reply_to}" if msg.reply_to else ""
+    """Одне повідомлення — один JSON-рядок: перенос рядка чи нік у профілі не підробить чужу репліку."""
+    resident = residents.get(msg.user_id) if msg.user_id and not msg.is_bot else None
     text = msg.text if len(msg.text) <= MAX_MESSAGE_CHARS else msg.text[:MAX_MESSAGE_CHARS] + "…[обрізано]"
-    return f"#{msg.message_id} {when} {who}{reply}: {text}"
+    line = json.dumps(
+        {
+            "n": msg.message_id,
+            "time": datetime.fromtimestamp(msg.ts, tz).strftime("%H:%M"),
+            "bot": msg.is_bot,
+            "author": None if msg.is_bot else msg.author,
+            "uid": None if msg.is_bot else msg.user_id,
+            "resident": f"{resident.name}, кв. {resident.apartment}" if resident else None,
+            "reply_to": msg.reply_to,
+            "text": text,
+        },
+        ensure_ascii=False,
+    )
+    # «<» екрануємо, щоб текст не міг закрити тег <chat>.
+    return line.replace("<", "\\u003c")
 
 
-def build_user_prompt(transcript: str, addressed_ids: list[int]) -> str:
+def build_user_prompt(
+    transcript: str, addressed_ids: list[int], strangers: frozenset[int] = frozenset()
+) -> str:
+    """strangers — номери звернень від тих, хто ще не представився."""
     prompt = f"Переписка чату (час за Києвом):\n<chat>\n{transcript}\n</chat>"
     if addressed_ids:
-        ids = ", ".join(f"#{i}" for i in addressed_ids)
+        ids = ", ".join(f"#{i}" + (" (автор не представився)" if i in strangers else "") for i in addressed_ids)
         prompt += f"\n\nДо тебе звернулися напряму в {ids} — обов'язково дай відповідь."
     return prompt
 
@@ -81,11 +102,14 @@ def should_intervene(
     now: float,
     cooldown_minutes: float,
     max_per_day: int,
+    last_emergency_ts: float | None = None,
 ) -> bool:
     """Модель пропонує, код вирішує: самовільно бот говорить лише при справжньому конфлікті і не частіше ліміту."""
     if decision.action != "reply" or not decision.text.strip():
         return False
-    if addressed or decision.emergency:
+    if addressed:
+        return True
+    if decision.emergency and (last_emergency_ts is None or now - last_emergency_ts >= EMERGENCY_GAP_SECONDS):
         return True
     if decision.tension not in ("conflict", "hostile"):
         return False
@@ -104,13 +128,15 @@ class Moderator:
         self.model = model
         self.system = SYSTEM_PROMPT.format(persona=persona)
 
-    async def decide(self, transcript: str, addressed_ids: list[int]) -> Decision | None:
+    async def decide(
+        self, transcript: str, addressed_ids: list[int], strangers: frozenset[int] = frozenset()
+    ) -> Decision | None:
         response = await self.client.messages.parse(
             model=self.model,
             max_tokens=4000,
             output_config={"effort": "medium"},
             system=self.system,
-            messages=[{"role": "user", "content": build_user_prompt(transcript, addressed_ids)}],
+            messages=[{"role": "user", "content": build_user_prompt(transcript, addressed_ids, strangers)}],
             output_format=Decision,
         )
         log.info(
@@ -124,3 +150,18 @@ class Moderator:
             log.warning("llm stop_reason=%s, пропускаю", response.stop_reason)
             return None
         return response.parsed_output
+
+    async def extract_intro(self, text: str) -> tuple[str, str] | None:
+        """Ім'я та квартира з вільної відповіді в особистих («мене звати Оля, живу в 12-й»)."""
+        response = await self.client.messages.parse(
+            model=self.model,
+            max_tokens=1000,
+            output_config={"effort": "low"},
+            system=EXTRACT_SYSTEM,
+            messages=[{"role": "user", "content": f"<answer>\n{text[:MAX_MESSAGE_CHARS]}\n</answer>"}],
+            output_format=ExtractedIntro,
+        )
+        intro = response.parsed_output if response.stop_reason == "end_turn" else None
+        if intro is None or not intro.found or not intro.name.strip() or not intro.apartment.strip():
+            return None
+        return intro.name.strip()[:40], intro.apartment.strip()[:10]

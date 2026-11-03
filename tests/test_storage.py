@@ -42,9 +42,10 @@ def test_residents_and_reminders(tmp_path):
     assert store.forget_resident(-1, 1)
     assert not store.forget_resident(-1, 1)
 
-    assert not store.was_reminded(-1, 2)
+    policy = dict(now=10**10, repeat_seconds=100, max_count=1)
+    assert store.needs_reminder(-1, 2, **policy)
     store.mark_reminded(-1, [2])
-    assert store.was_reminded(-1, 2)
+    assert not store.needs_reminder(-1, 2, **policy)
 
 
 def test_migrate_moves_residents_and_drops_old_context(tmp_path):
@@ -77,3 +78,41 @@ def test_prune_and_events(tmp_path):
     assert store.count_events("llm", now - 60, chat_id=-1) == 1
     assert store.last_event(-2, "llm") == now - 5
     assert store.last_event(-2, "intervention") is None
+
+
+def test_reminders_repeat_with_gap_up_to_limit(tmp_path):
+    store = make_store(tmp_path)
+    policy = dict(repeat_seconds=100, max_count=3)
+    assert store.needs_reminder(-1, 5, now=0, **policy)
+    store.mark_reminded(-1, [5], now=1000)
+    assert not store.needs_reminder(-1, 5, now=1050, **policy)
+    assert store.needs_reminder(-1, 5, now=1101, **policy)
+    store.mark_reminded(-1, [5], now=1101)
+    store.mark_reminded(-1, [5], now=1300)
+    assert not store.needs_reminder(-1, 5, now=99999, **policy)
+
+
+def test_pending_intro_keeps_greeting_and_mute_when_link_pressed_later(tmp_path):
+    store = make_store(tmp_path)
+    store.add_pending(-1, 7, 555, muted=True)
+    store.add_pending(-1, 7, None, muted=False)  # людина натиснула «Представитися»
+    pending = store.pending_for_user(7)
+    assert (pending.chat_id, pending.greeting_message_id, pending.muted) == (-1, 555, True)
+    assert store.count_muted(-1) == 1
+    store.drop_pending(-1, 7)
+    assert store.get_pending(-1, 7) is None and store.count_muted(-1) == 0
+
+
+def test_old_database_gets_reminder_counter(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE members (chat_id INTEGER, user_id INTEGER, intro_reminded_at REAL, PRIMARY KEY (chat_id, user_id))")
+    db.execute("INSERT INTO members VALUES (-1, 5, 1000)")
+    db.commit()
+    db.close()
+
+    store = Storage(str(path))
+    assert store.needs_reminder(-1, 5, now=2000, repeat_seconds=100, max_count=2)
+    assert not store.needs_reminder(-1, 5, now=2000, repeat_seconds=100, max_count=1)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -12,8 +13,13 @@ from zoneinfo import ZoneInfo
 import anthropic
 from telegram import (
     BotCommand,
+    BotCommandScopeAllChatAdministrators,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
+    ChatPermissions,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LinkPreviewOptions,
     Message,
     MessageEntity,
     ReactionTypeEmoji,
@@ -36,8 +42,9 @@ from telegram.helpers import mention_html
 from . import prompts
 from .config import Settings
 from .moderator import Decision, Moderator, render_transcript, should_intervene
+from .safety import clean_intro, unsafe_reason
 from .scheduler import Debouncer
-from .storage import Storage, StoredMessage
+from .storage import PendingIntro, Storage, StoredMessage
 
 log = logging.getLogger(__name__)
 
@@ -46,19 +53,18 @@ IAM_RE = re.compile(
     r"^(?P<name>.+?)[\s,;]+(?:кв\.?|квартира|kv\.?|apt\.?|№)?\s*(?P<apt>\d{1,4}[a-zа-яіїє]?)\s*$",
     re.IGNORECASE,
 )
-GREETING_GAP_SECONDS = 120
 MAX_REMINDER_NAMES = 5
+MAX_GREETINGS_PER_JOIN = 5
 INTRO_REACTION = "🤝"
+INTRO_PAYLOAD = "intro_"
+GATE_CHECK_SECONDS = 600
 
 
 def parse_iam(raw: str) -> tuple[str, str] | None:
     match = IAM_RE.match(raw.strip())
     if not match:
         return None
-    name = match["name"].strip(" ,;-—")
-    if not name or len(name) > 40:
-        return None
-    return name, match["apt"]
+    return clean_intro(match["name"].strip(" ,;-—"), match["apt"])
 
 
 def apartment_key(apartment: str) -> tuple[int, str]:
@@ -80,6 +86,7 @@ class DobrosusidBot:
         self.app: Application = (
             ApplicationBuilder().token(settings.telegram_token).post_init(self._post_init).build()
         )
+        self._background: set[asyncio.Task] = set()
         self._register_handlers()
 
     def run(self) -> None:
@@ -92,7 +99,8 @@ class DobrosusidBot:
         app.add_handler(ChatMemberHandler(self.on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
         app.add_handler(MessageHandler(filters.StatusUpdate.MIGRATE, self.on_migrate))
         app.add_handler(MessageHandler(GROUPS & filters.StatusUpdate.NEW_CHAT_MEMBERS, self.on_new_members))
-        app.add_handler(CommandHandler(["start", "help"], self.cmd_help))
+        app.add_handler(CommandHandler("start", self.cmd_start))
+        app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("rules", self.cmd_rules))
         app.add_handler(CommandHandler("iam", self.cmd_iam, filters=GROUPS))
         app.add_handler(CommandHandler("who", self.cmd_who, filters=GROUPS))
@@ -100,6 +108,7 @@ class DobrosusidBot:
         app.add_handler(CommandHandler("intro", self.cmd_intro, filters=GROUPS))
         app.add_handler(CommandHandler("pause", self.cmd_pause, filters=GROUPS))
         app.add_handler(CommandHandler("resume", self.cmd_resume, filters=GROUPS))
+        app.add_handler(CommandHandler("letin", self.cmd_letin, filters=GROUPS))
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(
             MessageHandler(
@@ -110,20 +119,33 @@ class DobrosusidBot:
         app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, self.on_private))
 
     async def _post_init(self, app: Application) -> None:
+        member_commands = [
+            BotCommand("rules", "Правила чату"),
+            BotCommand("iam", "Представитися: ім'я, квартира"),
+            BotCommand("who", "Хто вже представився"),
+            BotCommand("forgetme", "Видалити моє представлення"),
+            BotCommand("help", "Що я вмію"),
+        ]
+        await app.bot.set_my_commands(member_commands, scope=BotCommandScopeAllGroupChats())
+        # Адмінські команди видно в меню лише адміністраторам; права все одно перевіряє _is_admin.
         await app.bot.set_my_commands(
-            [
-                BotCommand("rules", "Правила чату"),
-                BotCommand("iam", "Представитися: ім'я, квартира"),
-                BotCommand("who", "Хто вже представився"),
-                BotCommand("forgetme", "Видалити моє представлення"),
-                BotCommand("help", "Що я вмію"),
+            member_commands
+            + [
+                BotCommand("status", "Стан бота в цьому чаті"),
+                BotCommand("letin", "Пустити новачка (відповіддю на привітання)"),
+                BotCommand("intro", "Оголошення-знайомство"),
+                BotCommand("pause", "Поставити бота на паузу"),
+                BotCommand("resume", "Зняти з паузи"),
             ],
-            scope=BotCommandScopeAllGroupChats(),
+            scope=BotCommandScopeAllChatAdministrators(),
         )
         await app.bot.set_my_commands(
             [BotCommand("start", "Що це за бот"), BotCommand("rules", "Правила чату")],
             scope=BotCommandScopeAllPrivateChats(),
         )
+        task = asyncio.create_task(self._gate_watchdog())
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
         log.info("бот @%s запущено, модель %s", app.bot.username, self.settings.model)
 
     # --- доступ ---------------------------------------------------------------
@@ -178,7 +200,7 @@ class DobrosusidBot:
         self.store.upsert_chat(chat.id, chat.title, adder if adder in self.settings.owner_ids else None)
         log.info("чат %s (%s): статус %s, додав %s", chat.id, chat.title, status, adder)
         if first_time:
-            await self._send(chat.id, prompts.ANNOUNCEMENT.format(persona=self.settings.persona_name))
+            await self._announce(chat.id)
 
     async def on_migrate(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -194,13 +216,20 @@ class DobrosusidBot:
         newcomers = [u for u in msg.new_chat_members if not u.is_bot and u.id not in residents]
         if not newcomers or self.store.get_chat(msg.chat_id).paused:
             return
-        last = self.store.last_event(msg.chat_id, "greeting")
-        if last and time.time() - last < GREETING_GAP_SECONDS:
-            # Хвилю новачків не вітаємо поштучно — їм нагадають, коли напишуть.
-            return
-        names = ", ".join(mention_html(u.id, u.first_name) for u in newcomers[:MAX_REMINDER_NAMES])
-        await self._send(msg.chat_id, prompts.GREETING.format(names=names), html_mode=True, reply_to=msg.message_id)
-        self.store.mark_reminded(msg.chat_id, [u.id for u in newcomers])
+        for user in newcomers[:MAX_GREETINGS_PER_JOIN]:
+            # Новачок пише в чат лише після знайомства; кнопка веде в особисті з ботом.
+            muted = self.settings.gate_new_members and await self._set_muted(msg.chat_id, user.id, True)
+            template = prompts.GREETING_GATED if muted else prompts.GREETING
+            sent = await self._send(
+                msg.chat_id,
+                template.format(name=mention_html(user.id, user.first_name)),
+                html_mode=True,
+                reply_to=msg.message_id,
+                markup=self._intro_markup(msg.chat_id),
+            )
+            self.store.add_pending(msg.chat_id, user.id, sent.message_id, muted=muted)
+            self.store.mark_reminded(msg.chat_id, [user.id])
+            log.info("чат %s: новачок %s, без права писати: %s", msg.chat_id, user.id, muted)
         self.store.add_event(msg.chat_id, "greeting")
 
     # --- звичайні повідомлення --------------------------------------------------
@@ -220,7 +249,7 @@ class DobrosusidBot:
             return
         if msg.forward_origin is not None:
             text = "[переслано] " + text
-        addressed = self._is_addressed(msg)
+        addressed = self._is_addressed(msg) and user_id is not None and self._may_address(msg.chat_id, user_id)
         self.store.add_message(
             msg.chat_id,
             msg.message_id,
@@ -246,10 +275,130 @@ class DobrosusidBot:
                 return True
         return self.settings.persona_name.lower() in (msg.text or msg.caption or "").lower()
 
+    def _may_address(self, chat_id: int, user_id: int) -> bool:
+        """Ліміт звернень на людину: зверх нього звернення читається як звичайне повідомлення.
+
+        Так один тролль не змусить бота відповідати щохвилини і не спалить денний бюджет за всіх.
+        """
+        now = time.time()
+        if (
+            self.store.count_user_events(user_id, "addressed", now - 600) >= self.settings.address_limit_per_10min
+            or self.store.count_user_events(user_id, "addressed", self._day_start())
+            >= self.settings.address_limit_per_day
+        ):
+            log.info("чат %s: %s вичерпав ліміт звернень", chat_id, user_id)
+            return False
+        self.store.add_event(chat_id, "addressed", now, user_id=user_id)
+        return True
+
+    # --- знайомство в особистих -------------------------------------------------
+
+    def _intro_markup(self, chat_id: int) -> InlineKeyboardMarkup:
+        link = f"https://t.me/{self.app.bot.username}?start={INTRO_PAYLOAD}{chat_id}"
+        return InlineKeyboardMarkup([[InlineKeyboardButton(prompts.INTRO_BUTTON, url=link)]])
+
+    async def _start_intro(self, update: Update, chat_id: int) -> None:
+        msg, user = update.effective_message, update.effective_user
+        if not self._chat_allowed(chat_id):
+            await msg.reply_text(prompts.DM_IDLE)
+            return
+        try:
+            member = await self.app.bot.get_chat_member(chat_id, user.id)
+            is_member = member.status in (
+                ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER
+            ) or (member.status == ChatMemberStatus.RESTRICTED and member.is_member)
+        except TelegramError:
+            is_member = False
+        if not is_member:
+            await msg.reply_text(prompts.DM_NOT_MEMBER)
+            return
+        self.store.add_pending(chat_id, user.id, None, muted=False)
+        title = self.store.get_chat(chat_id).title or "сусідів"
+        await msg.reply_text(prompts.DM_ASK.format(persona=self.settings.persona_name, chat=title))
+
     async def on_private(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        await update.effective_message.reply_text(
-            "Я працюю в чаті сусідів і стежу, щоб там було по-доброму 🙂 /start — докладніше."
+        msg, user = update.effective_message, update.effective_user
+        pending = self.store.pending_for_user(user.id) if user else None
+        if pending is None or not msg.text:
+            await msg.reply_text(prompts.DM_IDLE)
+            return
+        day = self._day_start()
+        llm_allowed = (
+            self.store.count_events("llm", day) < self.settings.max_llm_calls_per_day
+            and self.store.count_user_events(user.id, "dm_llm", day) < self.settings.dm_llm_limit_per_day
         )
+        # Модель краще розуміє вільну відповідь («мене звати Оля, живу в 12-й»), регулярка — запасний шлях.
+        intro = None
+        if llm_allowed:
+            self.store.add_event(pending.chat_id, "llm")
+            self.store.add_event(pending.chat_id, "dm_llm", user_id=user.id)
+            try:
+                extracted = await self.moderator.extract_intro(msg.text)
+                # Модель лише витягує, а що вважати іменем, вирішує код.
+                intro = clean_intro(*extracted) if extracted else None
+            except anthropic.APIError:
+                log.exception("помилка Claude API під час знайомства")
+                intro = parse_iam(msg.text)
+        else:
+            intro = parse_iam(msg.text)
+        if intro is None:
+            await msg.reply_text(prompts.DM_RETRY)
+            return
+        name, apartment = intro
+        unmuted = await self._register_resident(pending.chat_id, user.id, name, apartment)
+        template = prompts.DM_DONE_UNMUTED if unmuted else prompts.DM_DONE
+        await msg.reply_text(template.format(name=name, apartment=apartment))
+
+    async def _register_resident(self, chat_id: int, user_id: int, name: str, apartment: str) -> bool:
+        """Записує сусіда; якщо він чекав знайомства — відкриває чат і оновлює привітання. True, якщо зняли обмеження."""
+        self.store.set_resident(chat_id, user_id, name, apartment)
+        log.info("чат %s: представився %s, кв. %s", chat_id, name, apartment)
+        pending: PendingIntro | None = self.store.get_pending(chat_id, user_id)
+        if pending is None:
+            return False
+        self.store.drop_pending(chat_id, user_id)
+        unmuted = pending.muted and await self._set_muted(chat_id, user_id, False)
+        if pending.greeting_message_id:
+            try:
+                await self.app.bot.edit_message_text(
+                    prompts.INTRODUCED_IN_CHAT.format(name=name, apartment=apartment),
+                    chat_id,
+                    pending.greeting_message_id,
+                )
+            except TelegramError as exc:
+                log.info("не вдалося оновити привітання: %s", exc)
+        return unmuted
+
+    async def _let_in(self, pending: PendingIntro) -> bool:
+        """Відкриває чат новачку без знайомства (адмін пустив або минув таймаут)."""
+        if not await self._set_muted(pending.chat_id, pending.user_id, False):
+            return False
+        # Запис «чекає знайомства» не прибираємо: кнопка «Представитися» лишається робочою.
+        self.store.unmark_muted(pending.chat_id, pending.user_id)
+        return True
+
+    async def _gate_watchdog(self) -> None:
+        """Новачок не повинен сидіти без права писати вічно, навіть якщо бот лежав чи модель збоїла."""
+        while True:
+            try:
+                cutoff = time.time() - self.settings.gate_timeout_hours * 3600
+                for pending in self.store.muted_before(cutoff):
+                    if await self._let_in(pending):
+                        log.info("чат %s: %s не представився за %s год — відкрив чат", pending.chat_id,
+                                 pending.user_id, self.settings.gate_timeout_hours)
+            except Exception:
+                log.exception("сторож новачків упав")
+            await asyncio.sleep(GATE_CHECK_SECONDS)
+
+    async def _set_muted(self, chat_id: int, user_id: int, muted: bool) -> bool:
+        permissions = ChatPermissions.no_permissions() if muted else ChatPermissions.all_permissions()
+        try:
+            await self.app.bot.restrict_chat_member(chat_id, user_id, permissions)
+            return True
+        except TelegramError as exc:
+            # Немає права «Блокувати користувачів» або це звичайна група, а не супергрупа.
+            log.warning("чат %s: не вдалося %s %s: %s", chat_id, "обмежити" if muted else "відкрити", user_id, exc)
+            return False
 
     # --- аналіз ------------------------------------------------------------------
 
@@ -271,9 +420,10 @@ class DobrosusidBot:
         context_messages = self.store.recent_messages(chat_id, self.settings.context_messages)
         transcript = render_transcript(context_messages, residents, chat.last_analyzed_id, self.tz)
         addressed_ids = [m.message_id for m in new if m.addressed]
+        strangers = frozenset(m.message_id for m in new if m.addressed and m.user_id not in residents)
         self.store.add_event(chat_id, "llm")
         try:
-            decision = await self.moderator.decide(transcript, addressed_ids)
+            decision = await self.moderator.decide(transcript, addressed_ids, strangers)
         except anthropic.APIError:
             log.exception("помилка Claude API для чату %s", chat_id)
             return
@@ -291,15 +441,15 @@ class DobrosusidBot:
         self.store.prune_messages()
 
     async def _save_introductions(self, chat_id: int, decision: Decision, new: list[StoredMessage]) -> None:
-        last_by_author = {m.user_id: m.message_id for m in new if m.user_id}
+        by_id = {m.message_id: m for m in new if m.user_id}
         for intro in decision.introductions:
-            name, apartment = intro.name.strip(), intro.apartment.strip()
-            # Записуємо лише тих, хто сам написав у цій пачці, — інакше можна «представити» сусіда.
-            if intro.user_id not in last_by_author or not name or not apartment:
+            # Автора визначаємо за номером повідомлення з цієї пачки — так «представити» сусіда не вийде.
+            msg = by_id.get(intro.message_id)
+            cleaned = clean_intro(intro.name, intro.apartment)
+            if msg is None or cleaned is None:
                 continue
-            self.store.set_resident(chat_id, intro.user_id, name[:40], apartment[:10])
-            log.info("чат %s: представився %s, кв. %s", chat_id, name, apartment)
-            await self._react(chat_id, last_by_author[intro.user_id])
+            await self._register_resident(chat_id, msg.user_id, *cleaned)
+            await self._react(chat_id, msg.message_id)
 
     async def _maybe_intervene(
         self,
@@ -317,14 +467,23 @@ class DobrosusidBot:
             now=time.time(),
             cooldown_minutes=self.settings.cooldown_minutes,
             max_per_day=self.settings.max_interventions_per_day,
+            last_emergency_ts=self.store.last_event(chat_id, "emergency"),
         )
         if not allowed:
+            return False
+        text = decision.text.strip()
+        reason = unsafe_reason(text, self.settings.allowed_link_domains)
+        if reason:
+            # Від імені бота посилання, картки чи телефони звучать «офіційно» — це шлях для шахраїв.
+            log.warning("чат %s: відповідь не надіслано (%s): %r", chat_id, reason, text)
             return False
         known_ids = {m.message_id for m in context_messages}
         reply_to = decision.reply_to_message_id if decision.reply_to_message_id in known_ids else None
         if reply_to is None and addressed:
             reply_to = addressed_ids[-1]
-        await self._send(chat_id, decision.text.strip(), reply_to=reply_to)
+        await self._send(chat_id, text, reply_to=reply_to)
+        if decision.emergency:
+            self.store.add_event(chat_id, "emergency")
         self.store.add_event(chat_id, "answer" if addressed else "intervention")
         return True
 
@@ -333,28 +492,43 @@ class DobrosusidBot:
         if last and time.time() - last < self.settings.intro_reminder_interval_minutes * 60:
             return
         residents = self.store.residents(chat_id)
+        now = time.time()
         pending: dict[int, str] = {}
         for m in new:
             if (
                 m.user_id
                 and m.user_id not in residents
                 and m.user_id not in pending
-                and not self.store.was_reminded(chat_id, m.user_id)
+                and self.store.needs_reminder(
+                    chat_id,
+                    m.user_id,
+                    now=now,
+                    repeat_seconds=self.settings.intro_reminder_repeat_days * 86400,
+                    max_count=self.settings.intro_reminder_max,
+                )
             ):
                 pending[m.user_id] = m.author
         if not pending:
             return
         chosen = list(pending.items())[:MAX_REMINDER_NAMES]
         names = ", ".join(mention_html(uid, name) for uid, name in chosen)
-        await self._send(chat_id, prompts.INTRO_REMINDER.format(names=names), html_mode=True)
-        self.store.mark_reminded(chat_id, [uid for uid, _ in chosen])
+        await self._send(
+            chat_id, prompts.INTRO_REMINDER.format(names=names), html_mode=True, markup=self._intro_markup(chat_id)
+        )
+        self.store.mark_reminded(chat_id, [uid for uid, _ in chosen], now)
         self.store.add_event(chat_id, "reminder")
 
     # --- надсилання ----------------------------------------------------------------
 
     async def _send(
-        self, chat_id: int, text: str, *, reply_to: int | None = None, html_mode: bool = False
-    ) -> None:
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_to: int | None = None,
+        html_mode: bool = False,
+        markup: InlineKeyboardMarkup | None = None,
+    ) -> Message:
         sent = await self.app.bot.send_message(
             chat_id,
             text,
@@ -362,11 +536,21 @@ class DobrosusidBot:
             reply_parameters=(
                 ReplyParameters(message_id=reply_to, allow_sending_without_reply=True) if reply_to else None
             ),
+            reply_markup=markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         # Власні повідомлення бота Telegram не присилає, тож пишемо їх у контекст самі.
         self.store.add_message(
             chat_id, sent.message_id, self.app.bot.id, self.settings.persona_name,
             sent.text or text, reply_to, sent.date.timestamp(), is_bot=True,
+        )
+        return sent
+
+    async def _announce(self, chat_id: int) -> None:
+        await self._send(
+            chat_id,
+            prompts.ANNOUNCEMENT.format(persona=self.settings.persona_name),
+            markup=self._intro_markup(chat_id),
         )
 
     async def _react(self, chat_id: int, message_id: int) -> bool:
@@ -378,6 +562,18 @@ class DobrosusidBot:
             return False
 
     # --- команди ----------------------------------------------------------------------
+
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        payload = context.args[0] if context.args else ""
+        if update.effective_chat.type == ChatType.PRIVATE and payload.startswith(INTRO_PAYLOAD):
+            try:
+                chat_id = int(payload.removeprefix(INTRO_PAYLOAD))
+            except ValueError:
+                chat_id = None
+            if chat_id is not None:
+                await self._start_intro(update, chat_id)
+                return
+        await self.cmd_help(update, context)
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = prompts.HELP.format(persona=self.settings.persona_name)
@@ -399,7 +595,7 @@ class DobrosusidBot:
             await msg.reply_text("Напишіть ім'я та номер квартири, наприклад: /iam Олена, 45")
             return
         name, apartment = parsed
-        self.store.set_resident(msg.chat_id, user.id, name, apartment)
+        await self._register_resident(msg.chat_id, user.id, name, apartment)
         if not await self._react(msg.chat_id, msg.message_id):
             await msg.reply_text(f"Приємно познайомитися, {name}! 🤝")
 
@@ -428,7 +624,7 @@ class DobrosusidBot:
 
     async def cmd_intro(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self._chat_allowed(update.effective_chat.id) and await self._is_admin(update):
-            await self._send(update.effective_chat.id, prompts.ANNOUNCEMENT.format(persona=self.settings.persona_name))
+            await self._announce(update.effective_chat.id)
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self._chat_allowed(update.effective_chat.id) and await self._is_admin(update):
@@ -439,6 +635,22 @@ class DobrosusidBot:
         if self._chat_allowed(update.effective_chat.id) and await self._is_admin(update):
             self.store.set_paused(update.effective_chat.id, False)
             await update.effective_message.reply_text("Я знову з вами 🙂")
+
+    async def cmd_letin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/letin відповіддю на привітання новачка — пустити його в чат без знайомства."""
+        msg = update.effective_message
+        if not self._chat_allowed(msg.chat_id) or not await self._is_admin(update):
+            return
+        target = msg.reply_to_message
+        pending = self.store.pending_by_greeting(msg.chat_id, target.message_id) if target else None
+        if pending is None:
+            await msg.reply_text("Дайте цю команду відповіддю на моє привітання новачка.")
+        elif not pending.muted:
+            await msg.reply_text("Ця людина вже може писати в чаті 🙂")
+        elif await self._let_in(pending):
+            await msg.reply_text("Готово, відкрив чат 👍 Познайомитися можна й пізніше — кнопкою в привітанні.")
+        else:
+            await msg.reply_text("Не вийшло — перевірте, чи є в мене право «Блокувати користувачів».")
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chat = update.effective_chat
@@ -456,9 +668,17 @@ class DobrosusidBot:
         bot = self.app.bot
         try:
             me = await bot.get_chat_member(chat_id, bot.id)
-            sees_all = me.status == ChatMemberStatus.ADMINISTRATOR or bot.can_read_all_group_messages
+            is_admin = me.status == ChatMemberStatus.ADMINISTRATOR
+            sees_all = is_admin or bot.can_read_all_group_messages
+            can_restrict = is_admin and me.can_restrict_members
         except TelegramError:
-            sees_all = False
+            sees_all = can_restrict = False
+        if not self.settings.gate_new_members:
+            gate = "Новачки без знайомства: можуть писати (шлюз вимкнено)"
+        elif can_restrict:
+            gate = f"Новачки без знайомства: не можуть писати; чекають знайомства — {self.store.count_muted(chat_id)}"
+        else:
+            gate = "Новачки без знайомства: можуть писати — дайте мені право «Блокувати користувачів»"
         since = self._day_start()
         counts = {
             kind: self.store.count_events(kind, since, chat_id)
@@ -471,6 +691,7 @@ class DobrosusidBot:
                 "Бачу всі повідомлення: так"
                 if sees_all
                 else "Бачу всі повідомлення: НІ — зробіть мене адміністратором чату",
+                gate,
                 f"Сьогодні: аналізів {counts['llm']}, втручань {counts['intervention']}, "
                 f"відповідей {counts['answer']}, нагадувань {counts['reminder']}, привітань {counts['greeting']}",
                 f"Представилися: {len(self.store.residents(chat_id))}",
