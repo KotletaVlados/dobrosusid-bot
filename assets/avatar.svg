@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Variant 1 "Котлетик": a friendly breaded cutlet on a plate, winking and waving hello. -->
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="45%" r="70%">
+      <stop offset="0" stop-color="#2f8f8a"/>
+      <stop offset="1" stop-color="#1d6668"/>
+    </radialGradient>
+    <linearGradient id="top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e29a48"/>
+      <stop offset="1" stop-color="#c7742c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#bg)"/>
+
+  <!-- plate -->
+  <ellipse cx="256" cy="368" rx="186" ry="50" fill="#0f4a4c" opacity="0.35" transform="translate(0 10)"/>
+  <ellipse cx="256" cy="362" rx="186" ry="50" fill="#f5efe4"/>
+  <ellipse cx="256" cy="358" rx="146" ry="34" fill="#e4dacb"/>
+
+  <!-- short thick arms in crust colour, behind the body: right one waves, left one rests -->
+  <path d="M392 288 C418 280 432 256 436 226" fill="none" stroke="#8f461a" stroke-width="34" stroke-linecap="round"/>
+  <path d="M120 296 C100 304 88 318 84 336" fill="none" stroke="#8f461a" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="84" cy="338" r="19" fill="#a24f1e"/>
+
+  <!-- cutlet: lumpy breaded crust and its golden top -->
+  <path d="M96 278 C94 236 120 206 160 196 C176 186 196 190 212 186 C232 180 252 184 268 182 C290 180 306 186 326 186 C360 188 396 208 410 240 C420 262 418 296 408 318 C392 350 356 366 320 368 C300 374 280 370 260 372 C236 374 214 370 194 368 C150 364 110 340 100 310 C96 300 96 290 96 278 Z" fill="#8f461a"/>
+  <path transform="translate(256 270) scale(0.94 0.88) translate(-256 -278)" d="M96 278 C94 236 120 206 160 196 C176 186 196 190 212 186 C232 180 252 184 268 182 C290 180 306 186 326 186 C360 188 396 208 410 240 C420 262 418 296 408 318 C392 350 356 366 320 368 C300 374 280 370 260 372 C236 374 214 370 194 368 C150 364 110 340 100 310 C96 300 96 290 96 278 Z" fill="url(#top)"/>
+  <ellipse cx="134" cy="238" rx="22" ry="8" transform="rotate(-52 134 238)" fill="#fff0cc" opacity="0.4"/>
+
+  <!-- waving mitten hand with a thumb, and bold wave marks -->
+  <ellipse cx="440" cy="204" rx="25" ry="31" transform="rotate(12 440 204)" fill="#a24f1e"/>
+  <ellipse cx="416" cy="214" rx="10" ry="15" transform="rotate(-35 416 214)" fill="#a24f1e"/>
+  <path d="M424 166 q-12 -10 -10 -26 M450 160 q-3 -14 6 -24" fill="none" stroke="#c4ece5" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- breadcrumbs -->
+  <g fill="#ffd690">
+    <circle cx="132" cy="252" r="5"/><circle cx="120" cy="290" r="4"/><circle cx="140" cy="326" r="5"/>
+    <circle cx="380" cy="238" r="5"/><circle cx="392" cy="282" r="4"/><circle cx="372" cy="322" r="5"/>
+    <circle cx="232" cy="204" r="4"/><circle cx="296" cy="202" r="5"/><circle cx="340" cy="214" r="3.5"/>
+    <circle cx="170" cy="348" r="4"/><circle cx="342" cy="346" r="4"/><circle cx="262" cy="356" r="3.5"/>
+    <circle cx="160" cy="226" r="3"/><circle cx="356" cy="262" r="3"/>
+  </g>
+  <g fill="#9d4f1d">
+    <circle cx="150" cy="276" r="3.5"/><circle cx="364" cy="300" r="3.5"/><circle cx="266" cy="198" r="3"/>
+    <circle cx="210" cy="352" r="3"/><circle cx="310" cy="354" r="3"/><circle cx="124" cy="314" r="3"/>
+    <circle cx="398" cy="258" r="3"/>
+  </g>
+
+  <!-- cheeks -->
+  <ellipse cx="176" cy="300" rx="25" ry="14" fill="#ff6e62" opacity="0.55"/>
+  <ellipse cx="336" cy="300" rx="25" ry="14" fill="#ff6e62" opacity="0.55"/>
+
+  <!-- eyes: left open with a raised brow, right winking -->
+  <path d="M178 222 Q202 207 228 218" fill="none" stroke="#3a1c0c" stroke-width="9" stroke-linecap="round"/>
+  <ellipse cx="204" cy="262" rx="20" ry="25" fill="#3a1c0c"/>
+  <circle cx="197" cy="252" r="7" fill="#ffffff"/>
+  <path d="M286 264 Q308 242 330 264" fill="none" stroke="#3a1c0c" stroke-width="11" stroke-linecap="round"/>
+
+  <!-- grin -->
+  <path d="M220 298 Q256 350 294 296 Q256 316 220 298 Z" fill="#3a1c0c" stroke="#3a1c0c" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M243 322 Q258 313 275 321 Q260 336 243 322 Z" fill="#ff8f80"/>
+</svg>
