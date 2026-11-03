@@ -22,7 +22,9 @@ class Settings:
     owner_ids: frozenset[int]
     allowed_chat_ids: frozenset[int]
     model: str = "claude-haiku-5-5"
-    persona_name: str = "Добросусід"
+    persona_name: str = "Котлетик-добросусід"
+    # Хто створив бота: він згадує автора, коли його питають «хто ти?», і в /help.
+    author: str = "Владислав «Котлета»"
     db_path: str = "dobrosusid.sqlite3"
     timezone: str = "Europe/Kyiv"
     # Аналіз запускається, коли в чаті на debounce секунд затихло,
@@ -61,6 +63,7 @@ class Settings:
             allowed_chat_ids=_ids(env.get("ALLOWED_CHAT_IDS", "")),
             model=env.get("ANTHROPIC_MODEL", cls.model),
             persona_name=env.get("PERSONA_NAME", cls.persona_name),
+            author=env.get("AUTHOR", cls.author),
             db_path=env.get("DB_PATH", cls.db_path),
             timezone=env.get("TIMEZONE", cls.timezone),
             debounce_seconds=float(env.get("DEBOUNCE_SECONDS", cls.debounce_seconds)),

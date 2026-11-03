@@ -58,6 +58,8 @@ MAX_GREETINGS_PER_JOIN = 5
 INTRO_REACTION = "🤝"
 INTRO_PAYLOAD = "intro_"
 GATE_CHECK_SECONDS = 600
+# Як сусіди кличуть бота: «Котлетику», «Котлетик», «Добросусіде»… але не «котлетики на вечерю».
+ADDRESS_RE = re.compile(r"(?<!\w)(?:котлетик(?:у|е|а|ом)?|добросусід\w*)(?!\w)", re.IGNORECASE)
 
 
 def parse_iam(raw: str) -> tuple[str, str] | None:
@@ -78,7 +80,7 @@ class DobrosusidBot:
         self.tz = ZoneInfo(settings.timezone)
         self.store = Storage(settings.db_path)
         self.moderator = Moderator(
-            anthropic.AsyncAnthropic(timeout=60.0), settings.model, settings.persona_name
+            anthropic.AsyncAnthropic(timeout=60.0), settings.model, settings.persona_name, settings.author
         )
         self.debouncer = Debouncer(
             self.analyze, settings.debounce_seconds, settings.max_wait_seconds
@@ -273,7 +275,8 @@ class DobrosusidBot:
                 return True
             if entity.type == MessageEntity.TEXT_MENTION and entity.user and entity.user.id == bot.id:
                 return True
-        return self.settings.persona_name.lower() in (msg.text or msg.caption or "").lower()
+        text = msg.text or msg.caption or ""
+        return bool(ADDRESS_RE.search(text)) or self.settings.persona_name.lower() in text.lower()
 
     def _may_address(self, chat_id: int, user_id: int) -> bool:
         """Ліміт звернень на людину: зверх нього звернення читається як звичайне повідомлення.
@@ -549,7 +552,7 @@ class DobrosusidBot:
     async def _announce(self, chat_id: int) -> None:
         await self._send(
             chat_id,
-            prompts.ANNOUNCEMENT.format(persona=self.settings.persona_name),
+            prompts.ANNOUNCEMENT.format(persona=self.settings.persona_name, author=self.settings.author),
             markup=self._intro_markup(chat_id),
         )
 
@@ -576,7 +579,7 @@ class DobrosusidBot:
         await self.cmd_help(update, context)
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        text = prompts.HELP.format(persona=self.settings.persona_name)
+        text = prompts.HELP.format(persona=self.settings.persona_name, author=self.settings.author)
         if update.effective_chat.type == ChatType.PRIVATE:
             user = update.effective_user
             owner = "так ✅" if user.id in self.settings.owner_ids else "ні"

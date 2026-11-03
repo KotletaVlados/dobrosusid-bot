@@ -123,10 +123,10 @@ def should_intervene(
 
 
 class Moderator:
-    def __init__(self, client: anthropic.AsyncAnthropic, model: str, persona: str):
+    def __init__(self, client: anthropic.AsyncAnthropic, model: str, persona: str, author: str):
         self.client = client
         self.model = model
-        self.system = SYSTEM_PROMPT.format(persona=persona)
+        self.system = SYSTEM_PROMPT.format(persona=persona, author=author)
 
     async def decide(
         self, transcript: str, addressed_ids: list[int], strangers: frozenset[int] = frozenset()

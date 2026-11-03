@@ -7,7 +7,7 @@ import re
 NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’ʼ\- ]{2,40}$")
 APARTMENT_RE = re.compile(r"^\d{1,4}[a-zа-яіїє]?$", re.IGNORECASE)
 APARTMENT_PREFIX_RE = re.compile(r"^(?:кв\.?|квартира|kv\.?|apt\.?|№)\s*", re.IGNORECASE)
-NAME_STOPWORDS = ("адмін", "admin", "осбб", "бот", "bot", "модератор", "керуюч", "добросусід")
+NAME_STOPWORDS = ("адмін", "admin", "осбб", "бот", "bot", "модератор", "керуюч", "добросусід", "котлетик")
 
 DOMAIN_RE = re.compile(r"\b(?:[a-z0-9][a-z0-9-]{0,62}\.)+[a-z]{2,}\b", re.IGNORECASE)
 USERNAME_RE = re.compile(r"@[A-Za-z0-9_]{4,}")

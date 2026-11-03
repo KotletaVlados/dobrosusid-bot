@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from dobrosusid.bot import apartment_key, parse_iam
+from dobrosusid.bot import ADDRESS_RE, apartment_key, parse_iam
 from dobrosusid.scheduler import Debouncer
 
 
@@ -65,3 +65,18 @@ def test_debouncer_urgent_fires_fast():
 
     asyncio.run(scenario())
     assert calls == [7]
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Котлетику, привіт!", True),
+        ("котлетик, ти тут?", True),
+        ("Добросусіде, підкажіть", True),
+        ("спитайте в добросусіда", True),
+        ("смажу котлетики на вечерю", False),
+        ("Котлета, ти адмін?", False),  # це звертання до автора, а не до бота
+    ],
+)
+def test_neighbours_can_call_bot_by_name(text, expected):
+    assert bool(ADDRESS_RE.search(text)) is expected
