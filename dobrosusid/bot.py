@@ -86,7 +86,11 @@ class DobrosusidBot:
             self.analyze, settings.debounce_seconds, settings.max_wait_seconds
         )
         self.app: Application = (
-            ApplicationBuilder().token(settings.telegram_token).post_init(self._post_init).build()
+            ApplicationBuilder()
+            .token(settings.telegram_token)
+            .post_init(self._post_init)
+            .post_shutdown(self._post_shutdown)
+            .build()
         )
         self._background: set[asyncio.Task] = set()
         self._register_handlers()
@@ -149,6 +153,11 @@ class DobrosusidBot:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
         log.info("бот @%s запущено, модель %s", app.bot.username, self.settings.model)
+
+    async def _post_shutdown(self, app: Application) -> None:
+        for task in list(self._background):
+            task.cancel()
+        await asyncio.gather(*self._background, return_exceptions=True)
 
     # --- доступ ---------------------------------------------------------------
 
