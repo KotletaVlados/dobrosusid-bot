@@ -97,6 +97,26 @@ def html(message_id=1, stamp="03.11.2026 18:00:00 UTC+02:00", author="Синте
             '<div class="text">Вигаданий текст</div></div></div>')
 
 
+@pytest.mark.parametrize("stamp, expected", [
+    ("03.11.2026 18:00:00 UTC+02:00", "2026-11-03T18:00:00+02:00"),
+    ("03.11.2026 18:00:00 GMT+02:00", "2026-11-03T18:00:00+02:00"),
+    ("03.07.2026 18:00:00 GMT+03:00", "2026-07-03T18:00:00+03:00"),
+    ("03.11.2026 18:00:00 GMT-05:30", "2026-11-03T18:00:00-05:30"),
+])
+def test_parser_accepts_utc_and_gmt_zone_labels(tmp_path, stamp, expected):
+    (tmp_path / "messages.html").write_text(html(stamp=stamp))
+    [message] = read_export(tmp_path)
+    assert message.date.isoformat() == expected
+
+
+@pytest.mark.parametrize("stamp", ["03.11.2026 18:00:00 GMT", "03.11.2026 18:00:00 EET+02:00",
+                                   "03.11.2026 18:00:00 +02:00", "03.11.2026 18:00:00 GMT+02:00 x"])
+def test_parser_rejects_other_zone_labels(tmp_path, stamp):
+    (tmp_path / "messages.html").write_text(html(stamp=stamp))
+    with pytest.raises(ValueError, match="Invalid Telegram message timestamp"):
+        list(read_export(tmp_path))
+
+
 @pytest.mark.parametrize("content", [html(stamp="invalid"), html(stamp=""), html(author=""),
                                      html(author="", cls="joined"), html() + html(),
                                      html(2) + html(1)])
