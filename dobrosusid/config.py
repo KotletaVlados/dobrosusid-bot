@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -53,6 +55,17 @@ class Settings:
     dm_llm_limit_per_day: int = 10
     # Домени, які бот може згадувати у відповідях (через кому). За замовчуванням — жодних посилань.
     allowed_link_domains: frozenset[str] = frozenset()
+    outage_channel: str = ""
+    outage_queue: str = "2.2"
+    outage_poll_minutes: float = 15
+
+    def __post_init__(self) -> None:
+        if self.outage_channel and not re.fullmatch(r"[A-Za-z0-9_]{1,32}", self.outage_channel):
+            raise ValueError("Invalid OUTAGE_CHANNEL")
+        if not re.fullmatch(r"[0-9]{1,2}\.[0-9]{1,2}", self.outage_queue):
+            raise ValueError("Invalid OUTAGE_QUEUE")
+        if not math.isfinite(self.outage_poll_minutes * 60) or self.outage_poll_minutes < 1:
+            raise ValueError("OUTAGE_POLL_MINUTES must be finite and at least 1")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -88,4 +101,7 @@ class Settings:
             allowed_link_domains=frozenset(
                 d.strip().lower() for d in env.get("ALLOWED_LINK_DOMAINS", "").split(",") if d.strip()
             ),
+            outage_channel=env.get("OUTAGE_CHANNEL", "").strip(),
+            outage_queue=env.get("OUTAGE_QUEUE", cls.outage_queue).strip(),
+            outage_poll_minutes=float(env.get("OUTAGE_POLL_MINUTES", cls.outage_poll_minutes)),
         )
