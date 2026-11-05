@@ -147,6 +147,7 @@ def test_disabled_access_and_model_target_guards(enabled, case):
 @pytest.mark.parametrize("text", [
     "Сьогодні 10:00-12:00", "Повторю: з 10:00 до 12:00", "Світло буде о 10:00",
     "Сьогодні світла не буде з 10 до 12", "Сьогодні світла не буде з 10.00 до 12.00",
+    "Сьогодні світла не буде з 10 год до 12 год.", "Світло дадуть о 10.00.",
 ])
 @pytest.mark.parametrize("enabled_source", [True, False])
 def test_model_time_guard_for_direct_and_unprompted_paths(enabled, text, enabled_source):
@@ -234,6 +235,26 @@ def test_introduction_and_schedule_in_same_message(enabled):
     asyncio.run(dob.analyze(CHAT))
     assert dob.store.residents(CHAT)[7].apartment == "45"
     assert len(dob.app.bot.of("send")) == 1
+
+
+@pytest.mark.parametrize("reply_to", [10, None])
+@pytest.mark.parametrize("direct", [True, False])
+def test_handled_schedule_question_never_reaches_model_reply_or_intervention(enabled, direct, reply_to):
+    dob, clock = enabled
+    question(dob, 10, addressed=direct)
+    dob.moderator.decision = flagged(10, "Графік дивіться у каналі.")
+    dob.moderator.decision.reply_to_message_id = reply_to
+    asyncio.run(dob.analyze(CHAT))
+    if not direct:
+        clock.now += 601
+        question(dob, 11)
+        dob.moderator.decision = flagged(11, "Графік є на сьогодні.")
+        dob.moderator.decision.reply_to_message_id = reply_to if reply_to is None else 11
+        asyncio.run(dob.analyze(CHAT))
+    sent = dob.app.bot.of("send")
+    assert len(sent) == 1
+    assert "21:00–24:00" in sent[0][2]
+    assert dob.store.count_events("intervention", 0, CHAT) == 0
 
 
 @pytest.mark.parametrize("on", [True, False])

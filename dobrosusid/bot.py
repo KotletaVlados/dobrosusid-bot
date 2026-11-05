@@ -42,7 +42,7 @@ from telegram.helpers import mention_html
 from . import prompts
 from .config import Settings
 from .moderator import Decision, Moderator, render_transcript, should_intervene
-from .outage import CLOCK, MODEL_TIME_RANGE, QUESTION, SCHEDULE_GAP_SECONDS, OutageSource
+from .outage import CLOCK, MODEL_CLOCK, MODEL_TIME_RANGE, QUESTION, SCHEDULE_GAP_SECONDS, OutageSource
 from .safety import clean_intro, unsafe_reason
 from .scheduler import Debouncer
 from .storage import PendingIntro, Storage, StoredMessage
@@ -443,7 +443,7 @@ class DobrosusidBot:
         residents = self.store.residents(chat_id)
         context_messages = self.store.recent_messages(chat_id, self.settings.context_messages)
         transcript = render_transcript(context_messages, residents, chat.last_analyzed_id, self.tz)
-        addressed_ids = [m.message_id for m in new if m.addressed]
+        addressed_ids = [m.message_id for m in new if m.addressed and m.message_id not in handled_ids]
         strangers = frozenset(m.message_id for m in new if m.addressed and m.user_id not in residents)
         self.store.add_event(chat_id, "llm")
         try:
@@ -467,7 +467,13 @@ class DobrosusidBot:
                 return
             addressed_ids = [i for i in addressed_ids if i != decision.schedule_request_message_id]
             context_messages = [m for m in context_messages if m.message_id != decision.schedule_request_message_id]
-        spoke = await self._maybe_intervene(chat_id, decision, addressed_ids, context_messages)
+        spoke = False
+        has_unhandled_message = any(m.message_id not in handled_ids for m in new)
+        targets_handled_question = (
+            decision.reply_to_message_id in handled_ids or (handled_ids and not has_unhandled_message)
+        )
+        if not targets_handled_question:
+            spoke = await self._maybe_intervene(chat_id, decision, addressed_ids, context_messages)
         if not spoke and self.settings.intro_reminders:
             await self._maybe_remind(chat_id, new)
         self.store.prune_messages()
@@ -537,7 +543,7 @@ class DobrosusidBot:
             return False
         text = decision.text.strip()
         # Only the source formatter may publish clock times, including quoted/injected ones.
-        if CLOCK.search(text) or MODEL_TIME_RANGE.search(text):
+        if CLOCK.search(text) or MODEL_CLOCK.search(text) or MODEL_TIME_RANGE.search(text):
             log.warning("чат %s: години з відповіді моделі заблоковано", chat_id)
             return False
         reason = unsafe_reason(text, self.settings.allowed_link_domains)

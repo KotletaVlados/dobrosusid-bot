@@ -59,6 +59,16 @@ def test_malformed_or_wrapped_next_date_never_merges_intervals(broken_header):
     assert channel.latest(date(2026, 11, 6), "2.2") is None
 
 
+def test_missing_comma_keeps_tomorrow_intervals_out_of_today():
+    html = HTML.replace("21:00 - 24:00", "08:00 - 10:00")
+    html = html.replace("03:00 - 05:00", "12:00 - 14:00")
+    html = html.replace("на завтра, 06.11.2026", "на завтра 06.11.2026")
+    answer = source(html).answer("2.2", NOW)
+    assert "На сьогодні, 05.11.2026: 00:00–01:00, 08:00–10:00" in answer
+    assert "На сьогодні, 05.11.2026: 00:00–01:00, 08:00–10:00, 12:00–14:00" not in answer
+    assert "На завтра, 06.11.2026: 12:00–14:00" in answer
+
+
 @pytest.mark.parametrize("old,new", [("21:00 - 24:00", "21:00 - 24:01"),
                                      ("21:00 - 24:00", "25:00 - 26:00"),
                                      ("21:00 - 24:00", "21:60 - 24:00"),
