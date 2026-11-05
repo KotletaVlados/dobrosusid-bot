@@ -76,6 +76,19 @@ class _Page(HTMLParser):
         self.stack[-1].children.append(data)
 
 
+# Telegram Desktop labels the zone offset "UTC+hh:mm" or, in newer versions, "GMT+hh:mm".
+_STAMP_FORMATS = ("%d.%m.%Y %H:%M:%S UTC%z", "%d.%m.%Y %H:%M:%S GMT%z")
+
+
+def _parse_stamp(stamp: str) -> datetime:
+    for fmt in _STAMP_FORMATS:
+        try:
+            return datetime.strptime(stamp, fmt)
+        except ValueError:
+            pass
+    raise ValueError("Invalid Telegram message timestamp")
+
+
 def read_export(directory: Path):
     """Yield in page order, including service/date separators (which may lack time).
 
@@ -109,10 +122,7 @@ def read_export(directory: Path):
             own = list(node.descendants(skip_forwarded=True))
             full = list(node.descendants())
             stamp = next((n.attrs["title"] for n in own if n.has("date") and "title" in n.attrs), None)
-            try:
-                date = datetime.strptime(stamp, "%d.%m.%Y %H:%M:%S UTC%z") if stamp else None
-            except ValueError:
-                raise ValueError("Invalid Telegram message timestamp") from None
+            date = _parse_stamp(stamp) if stamp else None
             if date is None and not service:
                 raise ValueError("Missing Telegram message timestamp")
             author = next((n.text().strip() for n in own if n.has("from_name")), "")
