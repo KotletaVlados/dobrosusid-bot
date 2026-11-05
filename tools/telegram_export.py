@@ -128,12 +128,15 @@ def read_export(directory: Path):
             text = "\n".join(n.text().strip() for n in full if n.has("text"))
             if service and not text:
                 text = "\n".join(n.text().strip() for n in own if n.has("body"))
-            reply = next((n for n in own if n.has("reply_to")), None)
+            reply = next((n for n in full if n.has("reply_to")), None)
             reply_id = None
             if reply:
                 for link in reply.descendants():
-                    target = re.search(r"GoToMessage\((\d+)\)", link.attrs.get("onclick", "") + link.attrs.get("href", ""))
+                    onclick_target = re.search(r"GoToMessage\((\d+)\)", link.attrs.get("onclick", ""))
+                    href = link.attrs.get("href", "")
+                    href_target = re.search(r"GoToMessage\((\d+)\)|#go_to_message(\d+)", href)
+                    target = onclick_target or href_target
                     if target:
-                        reply_id = int(target[1])
+                        reply_id = int(next(group for group in target.groups() if group is not None))
                         break
             yield ExportMessage(message_id, date, author, text, reply_id, service, any(n.has("forwarded") for n in full))

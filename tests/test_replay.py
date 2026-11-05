@@ -114,6 +114,42 @@ def test_parser_pages_sorted_numerically_and_missing_export(tmp_path):
     assert [m.message_id for m in read_export(tmp_path)] == [1, 2, 10]
 
 
+def test_parser_reply_to_link_to_earlier_html_page(tmp_path):
+    first_page = html(1)
+    second_page = html(2).replace(
+        '<div class="text">Вигаданий текст</div>',
+        '<div class="reply_to"><a href="messages.html#go_to_message1">Відповідь</a></div>'
+        '<div class="text">Вигаданий текст</div>',
+    )
+    (tmp_path / "messages.html").write_text(first_page)
+    (tmp_path / "messages2.html").write_text(second_page)
+
+    messages = list(read_export(tmp_path))
+    assert messages[1].reply_to == 1
+    _, _, transport = run(messages)
+    transcript = transport.prompts[0]["messages"][0]["content"]
+    assert '"reply_to": 1' in transcript
+
+
+def test_parser_forwarded_reply_keeps_outer_message_metadata(tmp_path):
+    content = (
+        '<div class="message" id="message2"><div class="body">'
+        '<div class="date" title="03.11.2026 18:00:00 UTC+02:00"></div>'
+        '<div class="from_name">Синтетик Б</div>'
+        '<div class="forwarded body"><div class="reply_to">'
+        '<a onclick="return GoToMessage(1)">Відповідь</a></div>'
+        '<div class="text">Пересланий синтетичний текст</div></div>'
+        '</div></div>'
+    )
+    (tmp_path / "messages.html").write_text(html(1) + content)
+
+    message = list(read_export(tmp_path))[-1]
+    assert message.reply_to == 1
+    assert message.author == "Синтетик Б"
+    assert message.date.isoformat() == "2026-11-03T18:00:00+02:00"
+    assert message.forwarded
+
+
 def test_batch_debounce_and_service_exclusion():
     rows, summary, transport = run(read_export(FIXTURE))
     assert [r["message_ids"] for r in rows] == [[10, 11, 13], [14]]
