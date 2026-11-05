@@ -13,6 +13,7 @@ from telegram.constants import ChatType
 from telegram.error import NetworkError
 
 from dobrosusid import bot as bot_module
+from dobrosusid import storage as storage_module
 from dobrosusid.moderator import Decision
 from dobrosusid.outage import CLOCK
 from test_flows import CHAT, OWNER, FakeBot, FakeMessage, bot
@@ -23,6 +24,7 @@ from test_outage import HTML, NOW, source
 def enabled(bot, monkeypatch):
     clock = SimpleNamespace(now=NOW)
     monkeypatch.setattr(bot_module, "time", SimpleNamespace(time=lambda: clock.now))
+    monkeypatch.setattr(storage_module, "time", SimpleNamespace(time=lambda: clock.now))
     bot.settings = replace(bot.settings, outage_channel="test_channel", intro_reminders=False)
     bot.outage = source()
     bot._day_start = lambda: datetime.fromtimestamp(clock.now, bot.tz).replace(hour=0, minute=0, second=0).timestamp()
@@ -142,7 +144,10 @@ def test_disabled_access_and_model_target_guards(enabled, case):
     assert dob.app.bot.of("send") == []
 
 
-@pytest.mark.parametrize("text", ["Сьогодні 10:00-12:00", "Повторю: з 10:00 до 12:00", "Світло буде о 10:00"])
+@pytest.mark.parametrize("text", [
+    "Сьогодні 10:00-12:00", "Повторю: з 10:00 до 12:00", "Світло буде о 10:00",
+    "Сьогодні світла не буде з 10 до 12", "Сьогодні світла не буде з 10.00 до 12.00",
+])
 @pytest.mark.parametrize("enabled_source", [True, False])
 def test_model_time_guard_for_direct_and_unprompted_paths(enabled, text, enabled_source):
     dob, _ = enabled
@@ -218,6 +223,19 @@ def test_schedule_in_batch_does_not_swallow_conflict_or_introduction(enabled):
     assert dob.store.count_events("intervention", 0, CHAT) == 1
 
 
+def test_introduction_and_schedule_in_same_message(enabled):
+    dob, _ = enabled
+    question(dob, 10, text="Я Олена, кв. 45. Де графік?")
+    dob.moderator.decision = Decision(
+        tension="calm", emergency=False, action="none", reply_to_message_id=None,
+        text="", introductions=[{"message_id": 10, "name": "Олена", "apartment": "45"}],
+        schedule_request_message_id=10,
+    )
+    asyncio.run(dob.analyze(CHAT))
+    assert dob.store.residents(CHAT)[7].apartment == "45"
+    assert len(dob.app.bot.of("send")) == 1
+
+
 @pytest.mark.parametrize("on", [True, False])
 def test_post_init_owns_poller_and_shutdown_cancels_only_own_tasks(enabled, on):
     dob, _ = enabled
@@ -289,6 +307,7 @@ import asyncio, json, sys
 from datetime import datetime
 from types import SimpleNamespace
 from dobrosusid import bot as module
+from dobrosusid import storage as storage_module
 from dobrosusid.bot import DobrosusidBot
 from dobrosusid.config import Settings
 from test_flows import CHAT, OWNER, FakeBot, FakeModerator
@@ -296,6 +315,7 @@ from test_outage import NOW, source
 from test_outage_flows import question
 now = NOW + float(sys.argv[2])
 module.time = SimpleNamespace(time=lambda: now)
+storage_module.time = SimpleNamespace(time=lambda: now)
 dob = DobrosusidBot(Settings(telegram_token="123:test", owner_ids=frozenset({OWNER}),
     allowed_chat_ids=frozenset(), db_path=sys.argv[1], outage_channel="test_channel", intro_reminders=False))
 dob.app = SimpleNamespace(bot=FakeBot())

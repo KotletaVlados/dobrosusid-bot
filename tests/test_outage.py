@@ -45,6 +45,20 @@ def test_date_in_text_is_authoritative_even_across_utc_midnight():
     assert block.day == TODAY
 
 
+@pytest.mark.parametrize("broken_header", [
+    "<br/>для черги 2.2:",
+    "<br/>для черги 2.21:",
+])
+def test_malformed_or_wrapped_next_date_never_merges_intervals(broken_header):
+    html = HTML.replace(
+        "для черги 2.2:</i><br/>🕓 <b>03:00", broken_header + "</i><br/>🕓 <b>03:00",
+    )
+    channel = parse_channel(html)
+    _, today = channel.latest(TODAY, "2.2")
+    assert today.intervals == (("00:00", "01:00"), ("21:00", "24:00"))
+    assert channel.latest(date(2026, 11, 6), "2.2") is None
+
+
 @pytest.mark.parametrize("old,new", [("21:00 - 24:00", "21:00 - 24:01"),
                                      ("21:00 - 24:00", "25:00 - 26:00"),
                                      ("21:00 - 24:00", "21:60 - 24:00"),

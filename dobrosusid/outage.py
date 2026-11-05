@@ -23,8 +23,13 @@ HEADER = re.compile(
     r"на\s+(сьогодні|завтра),\s*(\d{2}\.\d{2}\.\d{4})"
     r"[^\n:]*?для\s+черги\s+([0-9]+(?:\.[0-9]+)*)\s*:", re.I,
 )
+BLOCK_START = re.compile(r"на\s+(?:сьогодні|завтра),\s*\d{2}\.\d{2}\.\d{4}", re.I)
 INTERVAL = re.compile(r"(?<![\d:])(\d{2}:\d{2})\s*[-–—]\s*(\d{2}:\d{2})(?![\d:])")
 CLOCK = re.compile(r"\b\d{1,2}:\d{2}\b")
+MODEL_TIME_RANGE = re.compile(
+    r"\b(?:з|із|с)?\s*\d{1,2}(?:[.:]\d{2})?\s*"
+    r"(?:до|[-–—])\s*\d{1,2}(?:[.:]\d{2})?\b", re.I,
+)
 QUESTION = re.compile(
     r"(?:де|где|який|какой|покаж\w*|скин\w*|дайте|є|есть)\s+(?:\w+\s+){0,2}граф[іи]к"
     r"|граф[іи]к\w*[^\n]{0,50}(?:світл|свет|відключ|отключ|сьогодні|сегодня|завтра|\?)"
@@ -158,10 +163,14 @@ def parse_channel(html: str) -> Channel:
         if stamp.tzinfo is None:
             raise ValueError("outage post without timezone")
         blocks = []
-        headers = list(HEADER.finditer(text))
-        for i, header in enumerate(headers):
+        boundaries = list(BLOCK_START.finditer(text))
+        for i, boundary in enumerate(boundaries):
+            header = HEADER.match(text, boundary.start())
+            if header is None:
+                # A malformed or wrapped date header still ends the prior block.
+                continue
             kind, day, queue = header.groups()
-            body = text[header.end():headers[i + 1].start() if i + 1 < len(headers) else len(text)]
+            body = text[header.end():boundaries[i + 1].start() if i + 1 < len(boundaries) else len(text)]
             blocks.append(Block(kind.lower(), datetime.strptime(day, "%d.%m.%Y").date(), queue, _intervals(body)))
             if blocks[-1].intervals is None:
                 log.warning("outage parse: invalid intervals in recognized block")
