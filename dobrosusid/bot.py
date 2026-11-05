@@ -42,6 +42,7 @@ from telegram.helpers import mention_html
 from . import prompts
 from .config import Settings
 from .moderator import Decision, Moderator, render_transcript, should_intervene
+from .outage import CLOCK, MODEL_CLOCK, MODEL_TIME_RANGE, QUESTION, SCHEDULE_GAP_SECONDS, OutageSource
 from .safety import clean_intro, unsafe_reason
 from .scheduler import Debouncer
 from .storage import PendingIntro, Storage, StoredMessage
@@ -79,6 +80,7 @@ class DobrosusidBot:
         self.settings = settings
         self.tz = ZoneInfo(settings.timezone)
         self.store = Storage(settings.db_path)
+        self.outage = OutageSource(settings.outage_channel, settings.outage_poll_minutes) if settings.outage_channel else None
         self.moderator = Moderator(
             anthropic.AsyncAnthropic(timeout=60.0), settings.model, settings.persona_name, settings.author
         )
@@ -152,6 +154,10 @@ class DobrosusidBot:
         task = asyncio.create_task(self._gate_watchdog())
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+        if self.outage is not None:
+            task = asyncio.create_task(self.outage.run(), name="outage-poller")
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
         log.info("бот @%s запущено, модель %s", app.bot.username, self.settings.model)
 
     async def _post_shutdown(self, app: Application) -> None:
@@ -424,6 +430,12 @@ class DobrosusidBot:
         self.store.set_last_analyzed(chat_id, new[-1].message_id)
         if chat.paused:
             return
+        # Common questions need no model call and still work when its budget is exhausted.
+        requests = [m for m in new if m.user_id and not m.is_bot and QUESTION.search(m.text)]
+        request = next((m for m in reversed(requests) if m.addressed), requests[-1] if requests else None)
+        handled_ids = set()
+        if await self._maybe_answer_schedule(chat_id, request.message_id if request else None, new):
+            handled_ids = {m.message_id for m in requests}
         if self.store.count_events("llm", self._day_start()) >= self.settings.max_llm_calls_per_day:
             log.warning("денний ліміт викликів моделі вичерпано, пропускаю чат %s", chat_id)
             return
@@ -431,7 +443,7 @@ class DobrosusidBot:
         residents = self.store.residents(chat_id)
         context_messages = self.store.recent_messages(chat_id, self.settings.context_messages)
         transcript = render_transcript(context_messages, residents, chat.last_analyzed_id, self.tz)
-        addressed_ids = [m.message_id for m in new if m.addressed]
+        addressed_ids = [m.message_id for m in new if m.addressed and m.message_id not in handled_ids]
         strangers = frozenset(m.message_id for m in new if m.addressed and m.user_id not in residents)
         self.store.add_event(chat_id, "llm")
         try:
@@ -447,10 +459,56 @@ class DobrosusidBot:
         )
 
         await self._save_introductions(chat_id, decision, new)
-        spoke = await self._maybe_intervene(chat_id, decision, addressed_ids, context_messages)
+        if (decision.schedule_request_message_id not in handled_ids
+                and await self._maybe_answer_schedule(chat_id, decision.schedule_request_message_id, new)):
+            other_ids = {m.message_id for m in new if m.message_id != decision.schedule_request_message_id}
+            if decision.reply_to_message_id not in other_ids:
+                self.store.prune_messages()
+                return
+            addressed_ids = [i for i in addressed_ids if i != decision.schedule_request_message_id]
+            context_messages = [m for m in context_messages if m.message_id != decision.schedule_request_message_id]
+        spoke = False
+        has_unhandled_message = any(m.message_id not in handled_ids for m in new)
+        targets_handled_question = (
+            decision.reply_to_message_id in handled_ids or (handled_ids and not has_unhandled_message)
+        )
+        if not targets_handled_question:
+            spoke = await self._maybe_intervene(chat_id, decision, addressed_ids, context_messages)
         if not spoke and self.settings.intro_reminders:
             await self._maybe_remind(chat_id, new)
         self.store.prune_messages()
+
+    async def _maybe_answer_schedule(
+        self, chat_id: int, request: int | None, new: list[StoredMessage]
+    ) -> bool:
+        source = getattr(self, "outage", None)  # Offline replay never starts a source.
+        if source is None or request is None:
+            return False
+        msg = next((m for m in new if m.message_id == request and m.user_id and not m.is_bot), None)
+        # A model cannot select old context, a channel, or another chat's message.
+        if msg is None:
+            return True
+        chat = self.store.get_chat(chat_id)
+        if not self._chat_allowed(chat_id) or chat is None or chat.paused:
+            return True
+        now = time.time()
+        last = self.store.last_event(chat_id, "schedule")
+        if not msg.addressed and last is not None and now - last < SCHEDULE_GAP_SECONDS:
+            return True
+        # Direct addresses already consume this same per-person budget on ingestion.
+        if not msg.addressed and not self._may_address(chat_id, msg.user_id):
+            return True
+        text = source.answer(self.settings.outage_queue, now)
+        reason = unsafe_reason(text, self.settings.allowed_link_domains)
+        if reason:
+            log.warning("чат %s: графік не надіслано (%s)", chat_id, reason)
+            return True
+        # Reserve before the Telegram await: concurrent analyses see the same limit.
+        if not msg.addressed:
+            self.store.add_event(chat_id, "schedule", now)
+        self.store.add_event(chat_id, "schedule_answer", now, user_id=msg.user_id)
+        await self._send(chat_id, text, reply_to=msg.message_id)
+        return True
 
     async def _save_introductions(self, chat_id: int, decision: Decision, new: list[StoredMessage]) -> None:
         by_id = {m.message_id: m for m in new if m.user_id}
@@ -484,6 +542,10 @@ class DobrosusidBot:
         if not allowed:
             return False
         text = decision.text.strip()
+        # Only the source formatter may publish clock times, including quoted/injected ones.
+        if CLOCK.search(text) or MODEL_CLOCK.search(text) or MODEL_TIME_RANGE.search(text):
+            log.warning("чат %s: години з відповіді моделі заблоковано", chat_id)
+            return False
         reason = unsafe_reason(text, self.settings.allowed_link_domains)
         if reason:
             # Від імені бота посилання, картки чи телефони звучать «офіційно» — це шлях для шахраїв.
@@ -589,6 +651,7 @@ class DobrosusidBot:
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text = prompts.HELP.format(persona=self.settings.persona_name, author=self.settings.author)
+        text += "\nНа «де графік?» показую актуальний графік відключень, якщо підключено канал."
         if update.effective_chat.type == ChatType.PRIVATE:
             user = update.effective_user
             owner = "так ✅" if user.id in self.settings.owner_ids else "ні"

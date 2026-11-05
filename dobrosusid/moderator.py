@@ -35,6 +35,7 @@ class Decision(BaseModel):
     reply_to_message_id: int | None
     text: str
     introductions: list[Introduction]
+    schedule_request_message_id: int | None = None
 
 
 class ExtractedIntro(BaseModel):
